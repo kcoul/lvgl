@@ -50,6 +50,24 @@ lv_display_t * lv_qnx_window_create(int32_t hor_res, int32_t ver_res);
 void lv_qnx_window_set_title(lv_display_t * disp, const char * title);
 
 /**
+ * Set the display's colour temperature, in kelvin.
+ *
+ * A warm, low-blue mode for after dark - the f.lux / Redshift effect, applied
+ * as a per-channel gain while the finished frame is copied into the window buffer.
+ * ZEN_WARM_NEUTRAL (6500) is identity and costs nothing; below it, blue and
+ * then green are attenuated. See tools/lvgl-common/zen_warm.h.
+ *
+ * This filters only what LVGL draws. A display-controller CTM would cover
+ * every client and is the right long-term home for it - see
+ * zenbox-hardware/docs/qnx-blue-light-filter.md for why that route is not
+ * available yet.
+ *
+ * @param   disp    The display object
+ * @param   kelvin  Target colour temperature
+ */
+void lv_qnx_window_set_kelvin(lv_display_t * disp, int kelvin);
+
+/**
  * Create a pointer input device for the display.
  * Only one pointer object is currently supported.
  * @param   disp    The display object associated with the device
