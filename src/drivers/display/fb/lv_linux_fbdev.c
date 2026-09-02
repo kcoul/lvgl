@@ -7,6 +7,7 @@
  *      INCLUDES
  *********************/
 #include "lv_linux_fbdev.h"
+#include "../../zenbox/zen_warm.h"
 #if LV_USE_LINUX_FBDEV
 
 #include <stdlib.h>
@@ -54,6 +55,9 @@ struct bsd_fb_fix_info {
 typedef struct {
     const char * devname;
     lv_color_format_t color_format;
+    zen_warm_t warm;
+    void * warm_row;            /* scratch, only for the non-mmap pwrite path */
+    size_t warm_row_size;
 #if LV_LINUX_FBDEV_BSD
     struct bsd_fb_var_info vinfo;
     struct bsd_fb_fix_info finfo;
@@ -208,17 +212,27 @@ lv_result_t lv_linux_fbdev_set_file(lv_display_t * disp, const char * file)
 
     switch(dsc->vinfo.bits_per_pixel) {
         case 16:
-            lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
+            dsc->color_format = LV_COLOR_FORMAT_RGB565;
             break;
         case 24:
-            lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB888);
+            dsc->color_format = LV_COLOR_FORMAT_RGB888;
             break;
         case 32:
-            lv_display_set_color_format(disp, LV_COLOR_FORMAT_XRGB8888);
+            dsc->color_format = LV_COLOR_FORMAT_XRGB8888;
             break;
         default:
             LV_LOG_WARN("Not supported color format (%d bits)", dsc->vinfo.bits_per_pixel);
             return LV_RESULT_INVALID;
+    }
+    lv_display_set_color_format(disp, dsc->color_format);
+
+    /*Colour temperature, from the environment so the boot-time autostart can
+     *come up warm without a rebuild. Unset means neutral, which costs nothing
+     *- the framebuffer write stays the memcpy it has always been.*/
+    {
+        const char * kelvin_env = getenv("LV_LINUX_KELVIN");
+        zen_warm_build(&dsc->warm,
+                       kelvin_env != NULL ? atoi(kelvin_env) : ZEN_WARM_NEUTRAL);
     }
 
     int32_t hor_res = dsc->vinfo.xres;
@@ -256,6 +270,17 @@ lv_result_t lv_linux_fbdev_set_file(lv_display_t * disp, const char * file)
     return LV_RESULT_OK;
 }
 
+void lv_linux_fbdev_set_kelvin(lv_display_t * disp, int kelvin)
+{
+    lv_linux_fb_t * dsc = lv_display_get_driver_data(disp);
+    zen_warm_build(&dsc->warm, kelvin);
+
+    /* The filter is applied on the way into the framebuffer, so only rows that
+     * get rewritten pick up the new temperature. Without a full invalidate the
+     * screen would warm one dirty rectangle at a time. */
+    lv_obj_invalidate(lv_screen_active());
+}
+
 void lv_linux_fbdev_set_force_refresh(lv_display_t * disp, bool enabled)
 {
     lv_linux_fb_t * dsc = lv_display_get_driver_data(disp);
@@ -266,12 +291,66 @@ void lv_linux_fbdev_set_force_refresh(lv_display_t * disp, bool enabled)
  *   STATIC FUNCTIONS
  **********************/
 
+/* Every row reaching the framebuffer passes through here - both branches of
+ * flush_cb call it, and software rotation has already been applied - so this is
+ * the one place the warm filter has to be, and it needs no knowledge of render
+ * mode, rotation or clipping.
+ *
+ * Unlike the QNX driver there was no existing per-pixel pass to ride on: fbdev
+ * writes are a straight memcpy, so on a filtered display this is genuinely new
+ * work. That matters more here than anywhere else in this tree, because the
+ * target is a 1 GHz ARM1176 with no NEON and a full repaint already costs
+ * ~35 ms. zen_warm_row_rgb565 memoises the previous pixel for that reason.
+ */
+static void warm_write(lv_linux_fb_t * dsc, void * dst, const void * data, size_t sz)
+{
+    switch(dsc->color_format) {
+        case LV_COLOR_FORMAT_RGB565:
+            zen_warm_row_rgb565(&dsc->warm, dst, data, sz / 2);
+            return;
+        case LV_COLOR_FORMAT_XRGB8888:
+        case LV_COLOR_FORMAT_ARGB8888:
+            zen_warm_row_argb8888(&dsc->warm, dst, data, sz / 4);
+            return;
+        default:
+            /* RGB888 and anything else: pass through unfiltered rather than
+             * corrupt it. Loud, because a night mode that silently does
+             * nothing on one pixel format is worse than one that refuses. */
+            LV_LOG_WARN("warm filter: unsupported colour format %d, passing through",
+                        (int)dsc->color_format);
+            lv_memcpy(dst, data, sz);
+            return;
+    }
+}
+
 static void write_to_fb(lv_linux_fb_t * dsc, uint32_t fb_pos, const void * data, size_t sz)
 {
 #if LV_LINUX_FBDEV_MMAP
     uint8_t * fbp = (uint8_t *)dsc->fbp;
-    lv_memcpy(&fbp[fb_pos], data, sz);
+    if(dsc->warm.active) {
+        /* Straight into the mapped framebuffer: the transform reads and writes
+         * one pixel at a time and never looks back, so no intermediate buffer
+         * is needed even though this is not a memcpy. */
+        warm_write(dsc, &fbp[fb_pos], data, sz);
+    }
+    else {
+        lv_memcpy(&fbp[fb_pos], data, sz);
+    }
 #else
+    if(dsc->warm.active) {
+        /* pwrite reads the source in one go, so this path does need scratch. */
+        if(dsc->warm_row_size < sz) {
+            dsc->warm_row = lv_realloc(dsc->warm_row, sz);
+            LV_ASSERT_MALLOC(dsc->warm_row);
+            if(dsc->warm_row == NULL) {
+                dsc->warm_row_size = 0;
+                return;
+            }
+            dsc->warm_row_size = sz;
+        }
+        warm_write(dsc, dsc->warm_row, data, sz);
+        data = dsc->warm_row;
+    }
     if(pwrite(dsc->fbfd, data, sz, fb_pos) < 0)
         LV_LOG_ERROR("write failed: %d", errno);
 #endif
@@ -296,6 +375,7 @@ static void del_event_cb(lv_event_t * e)
         close(dsc->fbfd);
         dsc->fbfd = -1;
     }
+    if(dsc->warm_row) lv_free(dsc->warm_row);
     if(dsc->rotated_buf) lv_free(dsc->rotated_buf);
     if(dsc->draw_buf_1) lv_free(dsc->draw_buf_1);
     if(dsc->draw_buf_2) lv_free(dsc->draw_buf_2);
