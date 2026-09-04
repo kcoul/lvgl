@@ -51,6 +51,7 @@ typedef struct {
     int                 pos[2];
     int                 buttons;
     uint32_t            last_move_ms;   /* tick of the last MTOUCH_MOVE */
+    bool                buttons_from_mtouch; /* set the buttons from touch, not a mouse */
     uint32_t            quiet_until_ms; /* ignore contact until this tick */
 } lv_qnx_pointer_t;
 
@@ -638,7 +639,7 @@ static void get_pointer(lv_indev_t * indev, lv_indev_data_t * data)
      * timeout from lv_timer_handler(), so this runs about every 33 ms even when
      * Screen has delivered nothing - which is what makes a timeout usable here
      * rather than needing an event to hang it on. */
-    if(dsc->buttons != 0 &&
+    if(dsc->buttons_from_mtouch && dsc->buttons != 0 &&
        (uint32_t)(get_ticks() - dsc->last_move_ms) > LV_QNX_TOUCH_IDLE_MS) {
         dsc->buttons = 0;
     }
@@ -669,6 +670,9 @@ static bool handle_pointer_event(lv_display_t * disp, screen_event_t event)
         LV_LOG_ERROR("screen_get_event_property_iv(BUTTONS): %s", strerror(errno));
         return false;
     }
+
+    /*A mouse reports its own releases, so the idle lift must not apply to it.*/
+    ptr_dsc->buttons_from_mtouch = false;
 
     lv_indev_read(dsc->pointer);
     return true;
@@ -825,6 +829,7 @@ static bool handle_mtouch_event(lv_display_t * disp, screen_event_t event, int t
         return false;
     }
     ptr_dsc->last_move_ms = now;
+    ptr_dsc->buttons_from_mtouch = true;
 
     /* Inside the quiet window this is the tail of a finger already lifted.
      * Report the position, press nothing. */
