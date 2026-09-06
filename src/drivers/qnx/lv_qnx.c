@@ -158,6 +158,12 @@ lv_display_t * lv_qnx_window_create(int32_t hor_res, int32_t ver_res)
     return disp;
 }
 
+screen_window_t lv_qnx_window_get_native(lv_display_t * disp)
+{
+    lv_qnx_window_t * dsc = lv_display_get_driver_data(disp);
+    return dsc != NULL ? dsc->window : NULL;
+}
+
 void lv_qnx_window_set_kelvin(lv_display_t * disp, int kelvin)
 {
     lv_qnx_window_t * dsc = lv_display_get_driver_data(disp);

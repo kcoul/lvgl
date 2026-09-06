@@ -73,6 +73,15 @@ void lv_qnx_window_set_kelvin(lv_display_t * disp, int kelvin);
  * @param   disp    The display object associated with the device
  * @return  true if successful, false otherwise
  */
+/**
+ * Get the underlying QNX Screen window.
+ *
+ * Zenbox addition. Needed to composite this window against another one on the
+ * same display - z-order and blending are Screen properties, and the driver
+ * owns the only handle. Returns NULL if `disp` is not a QNX display.
+ */
+screen_window_t lv_qnx_window_get_native(lv_display_t * disp);
+
 bool lv_qnx_add_pointer_device(lv_display_t * disp);
 
 /**
