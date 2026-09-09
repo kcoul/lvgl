@@ -164,6 +164,16 @@ screen_window_t lv_qnx_window_get_native(lv_display_t * disp)
     return dsc != NULL ? dsc->window : NULL;
 }
 
+screen_context_t lv_qnx_context_get_native(lv_display_t * disp)
+{
+    /* One context per driver, not per display - `context` is file-static and
+     * created on first use, so this does not need the display at all. Taking it
+     * anyway keeps the accessor honest about what it belongs to, and leaves
+     * room for a per-display context later without changing every caller. */
+    LV_UNUSED(disp);
+    return context;
+}
+
 void lv_qnx_window_set_kelvin(lv_display_t * disp, int kelvin)
 {
     lv_qnx_window_t * dsc = lv_display_get_driver_data(disp);
@@ -807,16 +817,51 @@ static bool handle_mtouch_event(lv_display_t * disp, screen_event_t event, int t
             int id = -1, p[2] = { -1, -1 };
             screen_get_event_property_iv(event, SCREEN_PROPERTY_TOUCH_ID, &id);
             screen_get_event_property_iv(event, SCREEN_PROPERTY_SOURCE_POSITION, p);
-            fprintf(stderr, "MT %-7s id=%d  %d,%d  buttons=%d\n",
+            fprintf(stderr, "MT %8u %-7s id=%d  %d,%d  buttons=%d\n",
+                    now,
                     type == SCREEN_EVENT_MTOUCH_TOUCH ? "TOUCH" :
                     type == SCREEN_EVENT_MTOUCH_MOVE  ? "MOVE"  : "RELEASE",
                     id, p[0], p[1], ptr_dsc->buttons);
         }
     }
 
-    /* TOUCH carries 0,0 on this panel, so it can neither position nor press
-     * anything. The MOVE that follows does both. */
+    /* TOUCH presses, but only when it brings a coordinate with it.
+     *
+     * The two panels differ here and the difference is the whole rule. The
+     * Waveshare AMOLED sends TOUCH on a bracket contact carrying 0,0 - it can
+     * neither position nor press anything, and the MOVE that follows does both.
+     * The FT5406 on the Pi 4 DSI panel sends TOUCH on the same contact as the
+     * MOVEs, carrying the real coordinate, and pressing on it is strictly more
+     * reliable than waiting for a MOVE.
+     *
+     * Waiting for a MOVE on the FT5406 is what made ENTER need several presses.
+     * A RELEASE opens a quiet window (below) in which MOVEs position but do not
+     * press, so a short tap landing inside the previous tap's window pressed
+     * nothing at all - and tapping again to compensate lands inside the window
+     * again, which is why it reads as a button that needs several tries.
+     * Reported from the panel 2026-09-08.
+     *
+     * 0,0 as the discriminator rather than a per-panel flag: it is the sentinel
+     * the Waveshare actually sends, it costs nothing to test, and the corner
+     * pixel is not a target on any screen here. A panel that genuinely reports
+     * a tap at the origin loses that one pixel and nothing else.
+     *
+     * The quiet window is ended rather than respected, because a TOUCH is an
+     * unambiguous new contact: whatever the previous one was still trailing,
+     * this is not part of it. */
     if(type == SCREEN_EVENT_MTOUCH_TOUCH) {
+        int p[2] = { 0, 0 };
+
+        if(screen_get_event_property_iv(event, SCREEN_PROPERTY_SOURCE_POSITION, p) == 0
+           && (p[0] != 0 || p[1] != 0)) {
+            ptr_dsc->pos[0] = p[0];
+            ptr_dsc->pos[1] = p[1];
+            ptr_dsc->last_move_ms   = now;
+            ptr_dsc->quiet_until_ms = now;
+            ptr_dsc->buttons_from_mtouch = true;
+            ptr_dsc->buttons = SCREEN_LEFT_MOUSE_BUTTON;
+            lv_indev_read(dsc->pointer);
+        }
         return true;
     }
 

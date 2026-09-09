@@ -82,6 +82,26 @@ void lv_qnx_window_set_kelvin(lv_display_t * disp, int kelvin);
  */
 screen_window_t lv_qnx_window_get_native(lv_display_t * disp);
 
+/**
+ * The Screen context this driver created and polls.
+ *
+ * Zenbox addition, and the reason it exists is worth stating: anything else in
+ * this process that needs a Screen window MUST create it in this context rather
+ * than one of its own.
+ *
+ * Screen queues events per context. This driver's event loop polls only the
+ * context it made, so a window living anywhere else is a queue with no reader -
+ * and on the Pi 4 DSI panel a second context did not merely go unread, it cost
+ * the first one events. Measured 2026-09-08: with a Vulkan window in a context
+ * of its own the panel received 8 MTOUCH TOUCH events for about 12 taps and the
+ * TOUCH and RELEASE counts did not match; with that window gone, 45 and 45.
+ * Neither frame pacing nor draining the second queue from its own thread
+ * recovered it.
+ *
+ * Returns NULL if `disp` is not a QNX display.
+ */
+screen_context_t lv_qnx_context_get_native(lv_display_t * disp);
+
 bool lv_qnx_add_pointer_device(lv_display_t * disp);
 
 /**
